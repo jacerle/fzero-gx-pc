@@ -1,0 +1,3 @@
+[submodule "external/fzero-gx-decomp"]
+	path = external/fzero-gx-decomp
+	url = https://github.com/jacerle/fzero-gx-decomp.git

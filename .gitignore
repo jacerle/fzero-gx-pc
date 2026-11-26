@@ -1,0 +1,35 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+.cache/
+compile_commands.json
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Copyrighted game images, dumps, and saves (NEVER commit)
+roms/
+orig/
+*.iso
+*.gcm
+*.rvz
+*.wia
+*.ciso
+*.gcz
+*.gci
+*.raw
+*.dol
+*.rel
+*.sfd
+*.adx
+
+# User runtime config / downloaded shader libs
+fzero-gx-pc.json
+imgui.ini
+librashader.so
+librashader.dll
+librashader.dylib
