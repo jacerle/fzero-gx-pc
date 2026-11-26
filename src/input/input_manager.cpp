@@ -304,6 +304,10 @@ void InputManager::test_rumble(int port) {
     sdl_provider_->set_rumble(port, 0.5f, 0.75f, 250);
 }
 
+void InputManager::set_rumble(int port, float low_freq, float high_freq, uint32_t duration_ms) {
+    sdl_provider_->set_rumble(port, low_freq, high_freq, duration_ms);
+}
+
 const PadState& InputManager::port_state(int port) const {
     if (port < 0 || port >= 4) {
         return ports_[0];

@@ -44,6 +44,12 @@ public:
     void draw();
     void tick_background_tasks();
 
+    // Boot control. The overlay only requests a boot; main.cpp runs it because the game takes
+    // over the host loop (the host frame runs from VIWaitForRetrace while the game is running).
+    bool consume_boot_request();
+    void set_game_running(bool running) { game_running_ = running; }
+    void set_boot_status(std::string status) { boot_status_ = std::move(status); }
+
 private:
     void draw_first_run_wizard();
     void draw_settings_window();
@@ -83,6 +89,9 @@ private:
     bool overlay_open_{false};
     bool quit_requested_{false};
     bool config_dirty_{false};
+    bool boot_requested_{false};
+    bool game_running_{false};
+    std::string boot_status_;
     std::string status_banner_;
     std::string error_banner_;
     std::string asset_action_status_;

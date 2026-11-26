@@ -3,6 +3,7 @@
 #include "assets/gx_texture.hpp"
 #include "assets/u8_arc.hpp"
 #include "audio/adx_decoder.hpp"
+#include "boot/boot.h"
 #include "core/config.hpp"
 #include "disc/disc_image.hpp"
 #include "disc/rvz_backend.hpp"
@@ -11,6 +12,7 @@
 #include "fzgx_port/platform_api.h"
 #include "game/dol_rel_loader.hpp"
 #include "input/input_manager.hpp"
+#include "platform/platform_services.hpp"
 #include "save/gci_card.hpp"
 #include "video/gx_state.hpp"
 
@@ -22,6 +24,11 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+
+extern "C" void fzgx_test_native_sdk(void); // tests/test_sdk.c
+extern "C" void fzgx_test_sdk_card(void);   // tests/test_sdk_card.c
+extern "C" void fzgx_test_boot_entry(void); // tests/test_sdk.c
+extern "C" void fzgx_test_decomp_layer(void); // tests/test_decomp_layer.c
 
 namespace {
 
@@ -52,7 +59,9 @@ void test_sha1() {
     assert(abc == "a9993e364706816aba3e25717850c26c9cd0d89d");
 }
 
-void test_synthetic_iso_fst_and_mod_override(const std::filesystem::path& tmp) {
+// Synthetic GFZE01 ISO (FST: root, data/, data/track.dat "MUTE_CITY_1", readme.txt "GFZE0") plus
+// a mod override directory `<tmp>/mods` replacing data/track.dat with "BIG_BLUE_MOD".
+std::filesystem::path write_synthetic_iso(const std::filesystem::path& tmp) {
     // Build minimal synthetic GameCube ISO:
     // 0x0000: header (GFZE01, magic 0xC2339F3D, title, FST at 0x500)
     // 0x0500: FST with root + dir "sys" + file "sys/boot.txt" + file "hello.bin"
@@ -106,10 +115,14 @@ void test_synthetic_iso_fst_and_mod_override(const std::filesystem::path& tmp) {
         std::ofstream mod_out(mod_dir / "data" / "track.dat", std::ios::binary);
         mod_out << "BIG_BLUE_MOD";
     }
+    return iso_path;
+}
 
+void test_synthetic_iso_fst_and_mod_override(const std::filesystem::path& tmp) {
+    const auto iso_path = write_synthetic_iso(tmp);
     fzgx::DiscImage disc;
     std::string err;
-    assert(disc.mount(iso_path, mod_dir, &err));
+    assert(disc.mount(iso_path, tmp / "mods", &err));
     assert(disc.header().is_fzero_gx_usa);
     assert(disc.header().game_id == "GFZE01");
     assert(disc.file_count() == 3);
@@ -123,6 +136,91 @@ void test_synthetic_iso_fst_and_mod_override(const std::filesystem::path& tmp) {
     assert(disc.read_file("data/track.dat", buf, &from_mod));
     assert(from_mod);
     assert(std::string(buf.begin(), buf.end()) == "BIG_BLUE_MOD");
+
+    // Logical reads: a range inside an overridden file comes from the override.
+    char raw[12]{};
+    assert(disc.read_logical(0x900, raw, 5) && std::memcmp(raw, "GFZE0", 5) == 0);
+    assert(disc.read_logical(0x802, raw, 10) && std::memcmp(raw, "G_BLUE_MOD", 10) == 0);
+    assert(disc.entry_number("/data/TRACK.dat") == 2);
+    assert(disc.effective_size(*disc.entry_at(2)) == 12);
+}
+
+// Native Dolphin SDK + natively compiled main.dol TUs (tests/test_sdk.c) over the synthetic ISO.
+void test_native_sdk(const std::filesystem::path& tmp) {
+    const auto iso_path = write_synthetic_iso(tmp);
+    fzgx::DiscImage disc;
+    assert(disc.mount(iso_path, tmp / "mods"));
+    fzgx::bind_platform_services(&disc, nullptr, nullptr, nullptr);
+    fzgx_test_native_sdk();
+    fzgx::bind_platform_services(nullptr, nullptr, nullptr, nullptr);
+}
+
+// Native boot path: SDK init order, game entry driving host frames through the retrace hook,
+// and re-boot from a dirty SDK state.
+void test_native_boot(const std::filesystem::path& tmp) {
+    int host_frames = 0;
+    fzgx::set_vi_retrace_hook([&host_frames] { ++host_frames; });
+
+    assert(fzgx_boot_main(fzgx_test_boot_entry) == FZGX_BOOT_NO_DISC);
+    assert(host_frames == 0);
+
+    const auto iso_path = write_synthetic_iso(tmp);
+    fzgx::DiscImage disc;
+    assert(disc.mount(iso_path, tmp / "mods"));
+    fzgx::bind_platform_services(&disc, nullptr, nullptr, nullptr);
+
+    assert(fzgx_boot_main(nullptr) == FZGX_BOOT_NO_ENTRY);
+    assert(fzgx_boot_main(fzgx_test_boot_entry) == FZGX_BOOT_ENTRY_RETURNED);
+    assert(host_frames == 3);
+    // The entry left the arena shrunk, interrupts off and a read pending; a re-boot is clean.
+    assert(fzgx_boot_main(fzgx_test_boot_entry) == FZGX_BOOT_ENTRY_RETURNED);
+    assert(host_frames == 6);
+    assert(fzgx_boot_main(nullptr) == FZGX_BOOT_NO_ENTRY); // leave the SDK clean for later tests
+
+    fzgx::set_vi_retrace_hook({});
+    fzgx::bind_platform_services(nullptr, nullptr, nullptr, nullptr);
+}
+
+// Native CARD library (tests/test_sdk_card.c) over a GCI folder, then checks the .gci it left.
+void test_native_sdk_card(const std::filesystem::path& tmp) {
+    constexpr size_t kBlock = fzgx::GciCardManager::kBlockSize;
+    const auto iso_path = write_synthetic_iso(tmp);
+    fzgx::DiscImage disc;
+    assert(disc.mount(iso_path, tmp / "mods"));
+    const auto slot_dir = tmp / "sdk_card" / "slot_a";
+    fzgx::GciCardManager card;
+    assert(card.mount_slot(0, slot_dir));
+    assert(card.write_gci_file(0, "GXXE", "ZZ", "other.dat", std::vector<uint8_t>(2 * kBlock, 0x5A)));
+    fzgx::bind_platform_services(&disc, nullptr, &card, nullptr);
+    fzgx_test_sdk_card();
+    fzgx::bind_platform_services(nullptr, nullptr, nullptr, nullptr);
+
+    fzgx::GciCardManager reread;
+    assert(reread.mount_slot(0, slot_dir));
+    assert(reread.files(0).size() == 2);
+    const fzgx::GciFileMeta* saved = nullptr;
+    for (const auto& f : reread.files(0)) {
+        if (f.file_name == "fzgx_renamed.dat") {
+            saved = &f;
+        }
+    }
+    assert(saved);
+    assert(saved->host_path.filename() == "01-GFZE-fzgx_renamed.dat.gci");
+    assert(saved->game_code == "GFZE" && saved->company == "01" && saved->block_count == 2);
+    const uint8_t* h = saved->header.data();
+    const auto be16 = [](const uint8_t* p) { return static_cast<uint32_t>((p[0] << 8) | p[1]); };
+    const auto be32 = [&be16](const uint8_t* p) { return (be16(p) << 16) | be16(p + 2); };
+    assert(h[0x06] == 0xFF && h[0x07] == 1);                                    // padding, C8 banner
+    assert(be32(h + 0x2C) == 0 && be16(h + 0x30) == 1 && be16(h + 0x32) == 3); // icon addr/format/speed
+    assert(h[0x34] == 0x04 && be32(h + 0x3C) == 5120);                         // public, comment addr
+    assert(std::filesystem::file_size(saved->host_path) == fzgx::GciCardManager::kGciHeaderSize + 2 * kBlock);
+    std::vector<uint8_t> payload;
+    assert(reread.read_gci_payload(0, "fzgx_renamed.dat", payload));
+    assert(payload.size() == 2 * kBlock);
+    for (size_t i = 0; i < kBlock; ++i) {
+        assert(payload[i] == static_cast<uint8_t>(i * 7 + 3));
+        assert(payload[kBlock + i] == static_cast<uint8_t>(i * 7 + 11));
+    }
 }
 
 void write_be64(uint8_t* p, uint64_t v) {
@@ -475,13 +573,6 @@ void test_mwcc_shims() {
     const uint8_t be_bytes[4] = {0x12, 0x34, 0x56, 0x78};
     assert(fzgx_be32(be_bytes) == 0x12345678u);
     assert(fzgx_bswap16(0xABCDu) == 0xCDABu);
-
-    const float a[3] = {1.0f, 2.0f, 3.0f};
-    const float b[3] = {4.0f, 5.0f, 6.0f};
-    float c[3]{};
-    fzgx_psvec_add(a, b, c);
-    assert(c[0] == 5.0f && c[1] == 7.0f && c[2] == 9.0f);
-    assert(fzgx_rlwinm(0x80000001u, 1, 30, 31) == 0x00000003u);
 }
 
 void test_avlz_decompress() {
@@ -943,6 +1034,7 @@ int main() {
     test_config_roundtrip(tmp);
     test_input_calibration_math();
     test_mwcc_shims();
+    fzgx_test_decomp_layer();
     test_avlz_decompress();
     test_u8_arc_parser();
     test_gx_texture_decoders();
@@ -950,6 +1042,9 @@ int main() {
     test_gx_hor_plus_projection();
     test_gx_tev_evaluator_and_fifo();
     test_gma_multilayer_tev_generation();
+    test_native_sdk(tmp);
+    test_native_sdk_card(tmp);
+    test_native_boot(tmp);
 
     std::filesystem::remove_all(tmp);
     std::cout << "All fzgx_tests passed.\n";

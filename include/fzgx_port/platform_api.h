@@ -10,14 +10,28 @@ extern "C" {
 #endif
 
 /*
- * C-callable host platform bridge for future linkage with decompiled C translation units.
- * Milestone 1 backs DVD, PAD, and CARD with DiscImage, InputManager, and GciCardManager,
- * and establishes clean GX and Audio/Video (SDL3 Audio + FFmpeg Sofdec) interface contracts.
+ * C-callable host platform bridge. The native Dolphin SDK replacement (src/sdk/) and
+ * decompiled C translation units reach host services (DiscImage, InputManager,
+ * GciCardManager, GX state, AudioEngine) only through these functions.
  */
+
+/* --- OS / time --- */
+/* Local wall-clock time since 2000-01-01 00:00 in GameCube timer ticks (40.5 MHz), as OSGetTime. */
+int64_t fzgx_os_time_ticks(void);
+
+/* --- VI / frame pacing --- */
+/* Blocks until the next host vertical retrace (host retrace hook, or 60 Hz pacing by default). */
+void fzgx_vi_wait_for_retrace(void);
 
 /* --- DVD / Disc FST --- */
 bool fzgx_dvd_exists(const char* fst_path);
 int32_t fzgx_dvd_read_file(const char* fst_path, void* out_buf, size_t max_bytes, size_t* out_read);
+/* FST entry number of an absolute disc path ("" or "/" is the root, entry 0); -1 when absent. */
+int32_t fzgx_dvd_path_to_entry(const char* fst_path);
+/* Entry metadata; length honours the mod override directory. Returns false for a bad entry. */
+bool fzgx_dvd_entry_info(int32_t entrynum, bool* out_is_dir, uint32_t* out_disc_offset, uint32_t* out_length);
+/* Reads logical disc bytes; reads inside a file with a mod override come from the override. */
+bool fzgx_dvd_read_abs(uint32_t disc_offset, void* dst, uint32_t length);
 
 /* --- PAD / Controller (4 GameCube ports) --- */
 typedef struct FzgxPadSnapshot {
@@ -34,9 +48,30 @@ typedef struct FzgxPadSnapshot {
 void fzgx_pad_read(int32_t port, FzgxPadSnapshot* out_pad);
 void fzgx_pad_set_rumble(int32_t port, float low_freq, float high_freq, uint32_t duration_ms);
 
-/* --- CARD / Dolphin GCI Memory Card --- */
+/* --- CARD / Dolphin GCI Memory Card (slots 0/1) --- */
+/*
+ * Files are addressed by their 64-byte big-endian GameCube directory entry (CARDDir, the .gci
+ * header): game code (0x00), maker code (0x04) and NUL-padded file name (0x08) identify a file.
+ * Payload offsets are relative to the first data block (the byte after the .gci header).
+ */
+#define FZGX_CARD_DENTRY_SIZE 64
+/* A card is inserted in a slot when the host has a GCI folder mounted for it. */
+bool fzgx_card_slot_mounted(int32_t slot);
+/* Stable serial number of the slot's GCI folder; 0 when the slot is not mounted. */
+uint64_t fzgx_card_serial(int32_t slot);
 int32_t fzgx_card_file_count(int32_t slot);
-int32_t fzgx_card_read(int32_t slot, const char* file_name, void* out_buf, size_t max_bytes, size_t* out_read);
+/* Directory entry of host file `index` (0 .. fzgx_card_file_count - 1), as stored on disk. */
+bool fzgx_card_file_dentry(int32_t slot, int32_t index, uint8_t out_dentry[FZGX_CARD_DENTRY_SIZE]);
+/* Creates a file with a zero-filled payload of the entry's block count (0x38); fails if it exists. */
+bool fzgx_card_create_file(int32_t slot, const uint8_t dentry[FZGX_CARD_DENTRY_SIZE]);
+/* Replaces the directory entry of the file `key`; a different name renames the file. */
+bool fzgx_card_set_dentry(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE],
+                          const uint8_t dentry[FZGX_CARD_DENTRY_SIZE]);
+bool fzgx_card_read_data(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE], uint32_t offset, void* dst,
+                         uint32_t length);
+bool fzgx_card_write_data(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE], uint32_t offset,
+                          const void* src, uint32_t length);
+bool fzgx_card_delete_file(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE]);
 
 /* --- GX / Graphics Command Boundary --- */
 void fzgx_gx_begin_frame(uint32_t internal_width, uint32_t internal_height, float aspect_ratio);

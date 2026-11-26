@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <utility>
 
 namespace fzgx {
 
@@ -85,6 +86,10 @@ OverlayUI::~OverlayUI() {
     }
 }
 
+bool OverlayUI::consume_boot_request() {
+    return std::exchange(boot_requested_, false);
+}
+
 void OverlayUI::tick_background_tasks() {
     std::string rom_pick;
     std::string mod_pick;
@@ -92,8 +97,11 @@ void OverlayUI::tick_background_tasks() {
     std::string libra_pick;
     {
         std::lock_guard lock(dialog_mutex_);
-        rom_pick.swap(pending_rom_pick_);
-        mod_pick.swap(pending_mod_dir_pick_);
+        // A running game reads the mounted disc: disc picks wait until it stops.
+        if (!game_running_) {
+            rom_pick.swap(pending_rom_pick_);
+            mod_pick.swap(pending_mod_dir_pick_);
+        }
         preset_pick.swap(pending_preset_pick_);
         libra_pick.swap(pending_libra_lib_pick_);
     }
@@ -475,6 +483,7 @@ void OverlayUI::tab_general_rom() {
         start_mod_dir_picker();
     }
 
+    ImGui::BeginDisabled(game_running_);
     if (ImGui::Button("Mount / Remount Disc")) {
         try_mount_configured_rom();
     }
@@ -482,6 +491,7 @@ void OverlayUI::tab_general_rom() {
     if (ImGui::Button("Verify Logical ISO SHA-1") && !config_.rom_path.empty()) {
         start_sha1_verification(disc_.is_mounted());
     }
+    ImGui::EndDisabled();
 
     if (sha1_running_.load()) {
         ImGui::ProgressBar(sha1_progress_.load(), ImVec2(-1.0f, 0.0f), "Computing Logical SHA-1...");
@@ -510,6 +520,21 @@ void OverlayUI::tab_general_rom() {
         ImGui::Text("Logical ISO: %.2f MiB | Chunk: %u KiB | DOL: 0x%X | FST Entries: %zu",
                     static_cast<double>(h.logical_iso_size) / (1024.0 * 1024.0),
                     h.chunk_size / 1024u, h.dol_offset, disc_.file_count());
+    }
+
+    ImGui::SeparatorText("Game");
+    if (game_running_) {
+        ImGui::Text("Game running (native main.dol boot).");
+    } else {
+        // The SHA-1 worker reads the disc on another thread; the game must not share it.
+        ImGui::BeginDisabled(!disc_.is_mounted() || sha1_running_.load());
+        if (ImGui::Button("Boot Game")) {
+            boot_requested_ = true;
+        }
+        ImGui::EndDisabled();
+    }
+    if (!boot_status_.empty()) {
+        ImGui::TextWrapped("%s", boot_status_.c_str());
     }
 
     ImGui::SeparatorText("Virtual Memory Cards (Dolphin GCI Folders)");

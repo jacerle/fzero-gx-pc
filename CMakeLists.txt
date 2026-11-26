@@ -254,6 +254,142 @@ if(UNIX AND NOT APPLE)
 endif()
 fzgx_apply_warnings(fzgx_video_ui)
 
+# --- Decompiled game TUs (external/fzero-gx-decomp) + native Dolphin SDK replacement ---
+#
+# Decomp TUs compile from the submodule as-is. Where a TU still has a 64-bit/LE portability
+# blocker, patches/decomp/<path>.patch is applied to a copy under build/decomp_overlay/;
+# the overlay shrinks as upstream lands R4/R5 (docs/RECOMPILATION_SCOPE.md).
+find_package(Git REQUIRED)
+set(FZGX_DECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/fzero-gx-decomp")
+set(FZGX_DECOMP_PATCH_DIR "${CMAKE_CURRENT_SOURCE_DIR}/patches/decomp")
+set(FZGX_DECOMP_OVERLAY_DIR "${CMAKE_CURRENT_BINARY_DIR}/decomp_overlay")
+
+function(fzgx_decomp_sources out_var)
+    set(result "")
+    foreach(rel IN LISTS ARGN)
+        set(src "${FZGX_DECOMP_DIR}/${rel}")
+        set(patch "${FZGX_DECOMP_PATCH_DIR}/${rel}.patch")
+        if(EXISTS "${patch}")
+            set(dst "${FZGX_DECOMP_OVERLAY_DIR}/${rel}")
+            get_filename_component(dst_dir "${dst}" DIRECTORY)
+            get_filename_component(src_dir "${src}" DIRECTORY)
+            # GIT_CEILING_DIRECTORIES stops git from discovering this repo, so `git apply`
+            # patches the overlay copy relative to the overlay root like GNU patch.
+            add_custom_command(
+                OUTPUT "${dst}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${dst_dir}"
+                COMMAND ${CMAKE_COMMAND} -E copy "${src}" "${dst}"
+                COMMAND ${CMAKE_COMMAND} -E env "GIT_CEILING_DIRECTORIES=${CMAKE_CURRENT_BINARY_DIR}"
+                        "${GIT_EXECUTABLE}" apply -p1 --whitespace=nowarn "${patch}"
+                WORKING_DIRECTORY "${FZGX_DECOMP_OVERLAY_DIR}"
+                DEPENDS "${src}" "${patch}"
+                COMMENT "Applying downstream overlay patch to ${rel}"
+                VERBATIM
+            )
+            # Keep the original directory first for quoted includes relative to the TU.
+            set_source_files_properties("${dst}" PROPERTIES INCLUDE_DIRECTORIES "${src_dir}")
+            list(APPEND result "${dst}")
+        else()
+            list(APPEND result "${src}")
+        endif()
+    endforeach()
+    set(${out_var} "${result}" PARENT_SCOPE)
+endfunction()
+
+# Shared compile environment for decomp TUs and the native SDK: the port's replacements for the
+# decomp's hardware/asm headers (searched first), decomp headers, and mwcc_shim.h force-included
+# so s32/u32 stay 32-bit on LP64/LLP64 hosts.
+set(FZGX_DECOMP_INCLUDE_DIRS
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/fzgx_port/decomp_overrides"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${FZGX_DECOMP_DIR}/include"
+)
+set(FZGX_DECOMP_SHIM "${CMAKE_CURRENT_SOURCE_DIR}/include/fzgx_port/mwcc_shim.h")
+# Decomp code is not ours to restyle; only 64-bit/ABI hazards are fatal.
+set(FZGX_DECOMP_GNU_ERROR_FLAGS
+    -Werror=pointer-to-int-cast
+    -Werror=int-to-pointer-cast
+    -Werror=implicit-function-declaration
+    -Werror=incompatible-pointer-types
+    -Werror=int-conversion
+)
+add_library(fzgx_decomp_env INTERFACE)
+target_include_directories(fzgx_decomp_env INTERFACE ${FZGX_DECOMP_INCLUDE_DIRS})
+if(MSVC)
+    target_compile_options(fzgx_decomp_env INTERFACE
+        "$<$<COMPILE_LANGUAGE:C>:/FI${FZGX_DECOMP_SHIM}>")
+else()
+    target_compile_options(fzgx_decomp_env INTERFACE
+        "$<$<COMPILE_LANGUAGE:C>:SHELL:-include ${FZGX_DECOMP_SHIM}>"
+        "$<$<COMPILE_LANGUAGE:C>:${FZGX_DECOMP_GNU_ERROR_FLAGS}>"
+    )
+
+    # Compile-readiness burn-down of main_rel: compiles every TU with the decomp environment
+    # and rewrites docs/MAIN_REL_STATUS.md. Not part of the default build.
+    list(TRANSFORM FZGX_DECOMP_GNU_ERROR_FLAGS PREPEND "--flag=" OUTPUT_VARIABLE FZGX_STATUS_FLAG_ARGS)
+    add_custom_target(main_rel_status
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/decomp_status.py"
+                --cc "${CMAKE_C_COMPILER}"
+                --decomp "${FZGX_DECOMP_DIR}"
+                --module main_rel
+                --shim "${FZGX_DECOMP_SHIM}"
+                --include-dirs ${FZGX_DECOMP_INCLUDE_DIRS}
+                ${FZGX_STATUS_FLAG_ARGS}
+                --out "${CMAKE_CURRENT_SOURCE_DIR}/docs/MAIN_REL_STATUS.md"
+        COMMENT "Compiling main_rel TUs for docs/MAIN_REL_STATUS.md"
+        VERBATIM
+    )
+endif()
+
+# Native Dolphin SDK replacement (OS / DVD / VI / PAD / CARD) over platform_api.h.
+add_library(fzgx_sdk STATIC
+    src/sdk/sdk_runtime.c
+    src/sdk/os.c
+    src/sdk/dvd.c
+    src/sdk/vi.c
+    src/sdk/pad.c
+    src/sdk/card.c
+    src/sdk/ppc_state.c
+)
+target_link_libraries(fzgx_sdk PUBLIC fzgx_decomp_env fzgx_core)
+fzgx_apply_warnings(fzgx_sdk)
+
+# main.dol TUs that compile natively against the SDK replacement.
+fzgx_decomp_sources(FZGX_DECOMP_DOL_SOURCES
+    src/dol/arc.c
+    src/dol/ClampStick.c
+    src/dol/fn_8007ED90.c
+)
+add_library(fzgx_decomp STATIC
+    ${FZGX_DECOMP_DOL_SOURCES}
+    src/decomp_port/dol_data.c
+    src/decomp_port/arc_host_order.c
+)
+target_link_libraries(fzgx_decomp PUBLIC fzgx_decomp_env fzgx_sdk)
+
+# main_rel TUs that compile natively (docs/MAIN_REL_STATUS.md, target main_rel_status). Built
+# but not linked yet: the module links once all 85 TUs, its data and the DOL code it calls do.
+# GCC/Clang only until decomp data (__declspec(section ...)) has an MSVC spelling.
+if(NOT MSVC)
+    fzgx_decomp_sources(FZGX_MAIN_REL_SOURCES
+        src/rel/main_rel/alloc_b.c
+        src/rel/main_rel/bg_tow.c
+        src/rel/main_rel/car_test_b.c
+        src/rel/main_rel/light.c
+        src/rel/main_rel/objput.c
+        src/rel/main_rel/ranking_c.c
+    )
+    add_library(fzgx_main_rel STATIC ${FZGX_MAIN_REL_SOURCES})
+    target_link_libraries(fzgx_main_rel PUBLIC fzgx_decomp)
+endif()
+
+# Native boot path (main.dol game_main.c equivalent): SDK init in retail order, then main_rel.
+add_library(fzgx_boot STATIC
+    src/boot/boot.c
+)
+target_link_libraries(fzgx_boot PUBLIC fzgx_decomp)
+fzgx_apply_warnings(fzgx_boot)
+
 # Main executable
 add_executable(fzero-gx-pc
     src/main.cpp
@@ -261,6 +397,7 @@ add_executable(fzero-gx-pc
 target_link_libraries(fzero-gx-pc PRIVATE
     fzgx_video_ui
     fzgx_core
+    fzgx_boot
 )
 fzgx_apply_warnings(fzero-gx-pc)
 
@@ -275,8 +412,11 @@ endif()
 if(BUILD_TESTING)
     add_executable(fzgx_tests
         tests/test_main.cpp
+        tests/test_sdk.c
+        tests/test_sdk_card.c
+        tests/test_decomp_layer.c
     )
-    target_link_libraries(fzgx_tests PRIVATE fzgx_core)
+    target_link_libraries(fzgx_tests PRIVATE fzgx_core fzgx_boot)
     fzgx_apply_warnings(fzgx_tests)
     add_test(NAME fzgx_unit_tests COMMAND fzgx_tests)
 endif()

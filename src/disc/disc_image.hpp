@@ -71,6 +71,15 @@ public:
     bool read_file(const std::string& fst_path, std::vector<uint8_t>& out_bytes, bool* out_from_mod = nullptr);
     bool read_dol(std::vector<uint8_t>& out_bytes);
 
+    // FST entry numbers as used by the Dolphin SDK DVD API: root = 0, files()[i] = i + 1.
+    int32_t entry_number(const std::string& fst_path) const;
+    const FstEntry* entry_at(int32_t entrynum) const;
+    // File size as the game sees it: the mod override's size when one exists.
+    uint64_t effective_size(const FstEntry& entry) const;
+    // Reads logical disc bytes. A range starting inside a file that has a mod override is
+    // served from the override (bytes past the override's end read as zero).
+    bool read_logical(uint64_t offset, void* dst, size_t size);
+
     // Computes SHA-1 over the logical uncompressed GameCube disc stream (works for both ISO and RVZ).
     bool compute_logical_sha1(
         std::string& out_hex,
@@ -84,6 +93,8 @@ public:
 
 private:
     bool parse_fst(std::string* error_out);
+    // Mod override file for an FST file entry, or an empty path when there is none.
+    std::filesystem::path mod_override_path(const FstEntry& entry) const;
 
     std::filesystem::path rom_path_;
     std::filesystem::path mod_override_dir_;
@@ -92,6 +103,7 @@ private:
     bool mounted_{false};
     std::vector<FstEntry> file_list_;
     std::unordered_map<std::string, size_t> path_index_;
+    std::vector<size_t> files_by_offset_; // file_list_ indices of files, sorted by disc offset
 };
 
 inline constexpr uint32_t kGameCubeMagic = 0xC2339F3Du;

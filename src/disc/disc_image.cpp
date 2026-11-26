@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 
 namespace fzgx {
 
@@ -197,6 +198,7 @@ void DiscImage::unmount() {
     backend_.reset();
     file_list_.clear();
     path_index_.clear();
+    files_by_offset_.clear();
     header_ = {};
 }
 
@@ -287,6 +289,14 @@ bool DiscImage::parse_fst(std::string* error_out) {
         }
     }
 
+    for (size_t i = 0; i < file_list_.size(); ++i) {
+        if (!file_list_[i].is_dir) {
+            files_by_offset_.push_back(i);
+        }
+    }
+    std::stable_sort(files_by_offset_.begin(), files_by_offset_.end(), [&](size_t a, size_t b) {
+        return file_list_[a].offset < file_list_[b].offset;
+    });
     return true;
 }
 
@@ -348,6 +358,78 @@ bool DiscImage::read_file(const std::string& fst_path, std::vector<uint8_t>& out
         return true;
     }
     return backend_->read_at(entry.offset, out_bytes.data(), static_cast<size_t>(entry.size));
+}
+
+int32_t DiscImage::entry_number(const std::string& fst_path) const {
+    const std::string norm = normalize_fst_path(fst_path);
+    if (norm.empty()) {
+        return mounted_ ? 0 : -1;
+    }
+    const auto it = path_index_.find(norm);
+    return it == path_index_.end() ? -1 : static_cast<int32_t>(it->second + 1);
+}
+
+const FstEntry* DiscImage::entry_at(int32_t entrynum) const {
+    if (entrynum < 1 || static_cast<size_t>(entrynum) > file_list_.size()) {
+        return nullptr;
+    }
+    return &file_list_[static_cast<size_t>(entrynum) - 1];
+}
+
+std::filesystem::path DiscImage::mod_override_path(const FstEntry& entry) const {
+    if (mod_override_dir_.empty() || entry.is_dir) {
+        return {};
+    }
+    auto mod_file = mod_override_dir_ / normalize_fst_path(entry.path);
+    std::error_code ec;
+    return std::filesystem::is_regular_file(mod_file, ec) ? mod_file : std::filesystem::path{};
+}
+
+uint64_t DiscImage::effective_size(const FstEntry& entry) const {
+    const auto mod_file = mod_override_path(entry);
+    if (!mod_file.empty()) {
+        std::error_code ec;
+        const auto sz = std::filesystem::file_size(mod_file, ec);
+        if (!ec) {
+            return sz;
+        }
+    }
+    return entry.size;
+}
+
+bool DiscImage::read_logical(uint64_t offset, void* dst, size_t size) {
+    if (!mounted_ || !backend_) {
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+    if (!mod_override_dir_.empty()) {
+        // Last file starting at or before `offset`.
+        auto it = std::upper_bound(files_by_offset_.begin(), files_by_offset_.end(), offset,
+                                   [&](uint64_t off, size_t idx) { return off < file_list_[idx].offset; });
+        if (it != files_by_offset_.begin()) {
+            const FstEntry& entry = file_list_[*std::prev(it)];
+            const auto mod_file = mod_override_path(entry);
+            const uint64_t rel = offset - entry.offset;
+            if (!mod_file.empty() && rel < std::max(entry.size, effective_size(entry))) {
+                std::ifstream in(mod_file, std::ios::binary);
+                if (!in) {
+                    return false;
+                }
+                auto* out = static_cast<char*>(dst);
+                in.seekg(static_cast<std::streamoff>(rel));
+                in.read(out, static_cast<std::streamsize>(size));
+                const auto got = in ? size : static_cast<size_t>(std::max<std::streamsize>(in.gcount(), 0));
+                std::memset(out + got, 0, size - got);
+                return true;
+            }
+        }
+    }
+    if (offset > backend_->logical_size() || size > backend_->logical_size() - offset) {
+        return false;
+    }
+    return backend_->read_at(offset, dst, size);
 }
 
 bool DiscImage::read_dol(std::vector<uint8_t>& out_bytes) {

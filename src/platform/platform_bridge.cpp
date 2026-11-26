@@ -1,3 +1,5 @@
+#include "platform/platform_services.hpp"
+
 #include "fzgx_port/platform_api.h"
 #include "fzgx_port/mwcc_shim.h"
 
@@ -8,7 +10,11 @@
 #include "video/gx_state.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <limits>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace fzgx {
@@ -21,6 +27,7 @@ struct PlatformServices {
 };
 
 static PlatformServices g_services{};
+static std::function<void()> g_vi_retrace_hook;
 
 void bind_platform_services(DiscImage* disc, InputManager* input, GciCardManager* card, AudioEngine* audio) {
     g_services.disc = disc;
@@ -29,9 +36,43 @@ void bind_platform_services(DiscImage* disc, InputManager* input, GciCardManager
     g_services.audio = audio;
 }
 
+void set_vi_retrace_hook(std::function<void()> hook) {
+    g_vi_retrace_hook = std::move(hook);
+}
+
+static GciCardManager* mounted_card(int32_t slot) {
+    if (!g_services.card || slot < 0 || slot > 1 || g_services.card->slot_dir(slot).empty()) {
+        return nullptr;
+    }
+    return g_services.card;
+}
+
 } // namespace fzgx
 
 extern "C" {
+
+int64_t fzgx_os_time_ticks(void) {
+    using namespace std::chrono;
+    // GameCube timer: bus clock (162 MHz) / 4 = 40.5 MHz = 81 ticks per 2 us. The RTC counts local time.
+    const auto local_now = current_zone()->to_local(system_clock::now());
+    const auto since_2000 = local_now - local_days{year{2000} / January / 1};
+    return duration_cast<microseconds>(since_2000).count() * 81 / 2;
+}
+
+void fzgx_vi_wait_for_retrace(void) {
+    if (fzgx::g_vi_retrace_hook) {
+        fzgx::g_vi_retrace_hook(); // host frame; pacing below keeps the game at the NTSC rate
+    }
+    using clock = std::chrono::steady_clock;
+    constexpr auto kNtscField = std::chrono::duration_cast<clock::duration>(std::chrono::nanoseconds(16'683'350));
+    static clock::time_point next_retrace{};
+    const auto now = clock::now();
+    if (next_retrace <= now - kNtscField) {
+        next_retrace = now + kNtscField; // first call, or fell more than a field behind: resync
+    }
+    std::this_thread::sleep_until(next_retrace);
+    next_retrace += kNtscField;
+}
 
 bool fzgx_dvd_exists(const char* fst_path) {
     if (!fzgx::g_services.disc || !fst_path) {
@@ -61,6 +102,50 @@ int32_t fzgx_dvd_read_file(const char* fst_path, void* out_buf, size_t max_bytes
     return 0;
 }
 
+int32_t fzgx_dvd_path_to_entry(const char* fst_path) {
+    if (!fzgx::g_services.disc || !fst_path) {
+        return -1;
+    }
+    return fzgx::g_services.disc->entry_number(fst_path);
+}
+
+bool fzgx_dvd_entry_info(int32_t entrynum, bool* out_is_dir, uint32_t* out_disc_offset, uint32_t* out_length) {
+    if (!fzgx::g_services.disc || !fzgx::g_services.disc->is_mounted()) {
+        return false;
+    }
+    bool is_dir = true;
+    uint32_t disc_offset = 0;
+    uint64_t length = 0;
+    if (entrynum != 0) {
+        const fzgx::FstEntry* entry = fzgx::g_services.disc->entry_at(entrynum);
+        if (!entry) {
+            return false;
+        }
+        is_dir = entry->is_dir;
+        if (!is_dir) {
+            disc_offset = static_cast<uint32_t>(entry->offset);
+            length = fzgx::g_services.disc->effective_size(*entry);
+        }
+    }
+    if (out_is_dir) {
+        *out_is_dir = is_dir;
+    }
+    if (out_disc_offset) {
+        *out_disc_offset = disc_offset;
+    }
+    if (out_length) {
+        *out_length = static_cast<uint32_t>(std::min<uint64_t>(length, std::numeric_limits<uint32_t>::max()));
+    }
+    return true;
+}
+
+bool fzgx_dvd_read_abs(uint32_t disc_offset, void* dst, uint32_t length) {
+    if (!fzgx::g_services.disc || (!dst && length != 0)) {
+        return false;
+    }
+    return fzgx::g_services.disc->read_logical(disc_offset, dst, length);
+}
+
 void fzgx_pad_read(int32_t port, FzgxPadSnapshot* out_pad) {
     if (!out_pad) {
         return;
@@ -81,40 +166,74 @@ void fzgx_pad_read(int32_t port, FzgxPadSnapshot* out_pad) {
 }
 
 void fzgx_pad_set_rumble(int32_t port, float low_freq, float high_freq, uint32_t duration_ms) {
-    (void)low_freq;
-    (void)high_freq;
-    (void)duration_ms;
     if (fzgx::g_services.input && port >= 0 && port < 4) {
-        fzgx::g_services.input->test_rumble(port);
+        fzgx::g_services.input->set_rumble(port, low_freq, high_freq, duration_ms);
     }
+}
+
+bool fzgx_card_slot_mounted(int32_t slot) {
+    return fzgx::mounted_card(slot) != nullptr;
+}
+
+uint64_t fzgx_card_serial(int32_t slot) {
+    const fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    if (!card) {
+        return 0;
+    }
+    // FNV-1a over the folder path: stable per folder, distinct between folders.
+    uint64_t hash = 0xcbf29ce484222325ULL;
+    for (const char c : card->slot_dir(slot).lexically_normal().generic_string()) {
+        hash ^= static_cast<uint8_t>(c);
+        hash *= 0x100000001b3ULL;
+    }
+    return hash != 0 ? hash : 1;
 }
 
 int32_t fzgx_card_file_count(int32_t slot) {
-    if (!fzgx::g_services.card || slot < 0 || slot > 1) {
-        return 0;
-    }
-    return static_cast<int32_t>(fzgx::g_services.card->files(slot).size());
+    const fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    return card ? static_cast<int32_t>(card->files(slot).size()) : 0;
 }
 
-int32_t fzgx_card_read(int32_t slot, const char* file_name, void* out_buf, size_t max_bytes, size_t* out_read) {
-    if (out_read) {
-        *out_read = 0;
+bool fzgx_card_file_dentry(int32_t slot, int32_t index, uint8_t out_dentry[FZGX_CARD_DENTRY_SIZE]) {
+    const fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    if (!card || !out_dentry || index < 0 || static_cast<size_t>(index) >= card->files(slot).size()) {
+        return false;
     }
-    if (!fzgx::g_services.card || !file_name || !out_buf) {
-        return -1;
+    const auto& header = card->files(slot)[static_cast<size_t>(index)].header;
+    std::memcpy(out_dentry, header.data(), header.size());
+    return true;
+}
+
+bool fzgx_card_create_file(int32_t slot, const uint8_t dentry[FZGX_CARD_DENTRY_SIZE]) {
+    fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    if (!card || !dentry) {
+        return false;
     }
-    std::vector<uint8_t> payload;
-    if (!fzgx::g_services.card->read_gci_payload(slot, file_name, payload)) {
-        return -1;
-    }
-    const size_t copy_len = std::min(payload.size(), max_bytes);
-    if (copy_len > 0) {
-        std::memcpy(out_buf, payload.data(), copy_len);
-    }
-    if (out_read) {
-        *out_read = copy_len;
-    }
-    return 0;
+    const size_t blocks = (static_cast<size_t>(dentry[0x38]) << 8) | dentry[0x39];
+    return card->create_entry(slot, dentry, std::vector<uint8_t>(blocks * fzgx::GciCardManager::kBlockSize, 0));
+}
+
+bool fzgx_card_set_dentry(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE],
+                          const uint8_t dentry[FZGX_CARD_DENTRY_SIZE]) {
+    fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    return card && key && dentry && card->update_entry_header(slot, key, dentry);
+}
+
+bool fzgx_card_read_data(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE], uint32_t offset, void* dst,
+                         uint32_t length) {
+    const fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    return card && key && card->read_entry_data(slot, key, offset, static_cast<uint8_t*>(dst), length);
+}
+
+bool fzgx_card_write_data(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE], uint32_t offset,
+                          const void* src, uint32_t length) {
+    fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    return card && key && card->write_entry_data(slot, key, offset, static_cast<const uint8_t*>(src), length);
+}
+
+bool fzgx_card_delete_file(int32_t slot, const uint8_t key[FZGX_CARD_DENTRY_SIZE]) {
+    fzgx::GciCardManager* card = fzgx::mounted_card(slot);
+    return card && key && card->delete_entry(slot, key);
 }
 
 void fzgx_gx_begin_frame(uint32_t width, uint32_t height, float aspect_ratio) {

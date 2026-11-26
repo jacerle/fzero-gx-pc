@@ -113,6 +113,8 @@ public:
     void refresh_devices();
     void poll(const AppConfig& config);
     void test_rumble(int port);
+    // Game-driven rumble (PADControlMotor); intensities 0..1, zero stops the motor.
+    void set_rumble(int port, float low_freq, float high_freq, uint32_t duration_ms);
 
     const PadState& port_state(int port) const;
     const std::array<PadState, 4>& all_ports() const { return ports_; }

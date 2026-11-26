@@ -14,6 +14,8 @@
 | **Saves** | Dolphin-compatible `.gci` folder (Slots A & B) | Portable saves/ghosts/custom machines with Dolphin without 16 MB card limits |
 | **Audio / FMV** | SDL3 Audio (AX/DSP + ADX) + FFmpeg (`libavcodec`) for `.sfd` | Clean C boundary (`fzgx_av_*`) behind `include/fzgx_port/platform_api.h` |
 | **Input** | `IInputProvider` (SDL3 Gamepad + Keyboard + WUP-028 stub) | Accurate stick outer-gate + dual-stage analog/digital L/R trigger calibration |
+| **Dolphin SDK** | Native C11 replacement in `src/sdk/` (OS, DVD, VI, PAD, CARD) over `platform_api.h` | Retail SDK TUs program MMIO/EXI/SI and paired-single asm; upstream R4 makes this the port's layer. Public surface: `include/fzgx_port/dolphin_sdk.h` |
+| **Decomp TUs** | Compiled from the submodule; blockers fixed by `patches/decomp/<path>.patch` overlays applied into `build/decomp_overlay/` | Submodule stays byte-matching upstream; overlays shrink as upstream lands R2/R4/R5 |
 
 ---
 
@@ -23,14 +25,17 @@
 fzero-gx-pc/
 ├── external/fzero-gx-decomp/   # Submodule synced with karamzov123/fzero-gx-decomp
 ├── third_party/librashader/    # MIT librashader v0.12.0 C dynamic-loader headers
-├── include/fzgx_port/          # MWCC shims & C-callable platform boundary
+├── include/fzgx_port/          # MWCC shims, C platform boundary, native SDK header
+├── patches/decomp/             # Downstream overlay patches for decomp TUs (64-bit/LE blockers)
 ├── shaders/                    # GLSL -> SPIR-V embedded calibration & CRT shaders
 ├── src/
 │   ├── core/                   # XDG/AppData paths & JSON AppConfig
 │   ├── disc/                   # Streaming SHA-1, GameCube ISO/GCM/RVZ + FST + mod overlay
 │   ├── save/                   # Dolphin-compatible GCI virtual Memory Card manager
 │   ├── input/                  # IInputProvider, stick/trigger math, SDL3 Gamepad
-│   ├── platform/               # C bridge connecting decomp SDK calls to PC services
+│   ├── platform/               # C bridge connecting the native SDK to PC services
+│   ├── sdk/                    # Native Dolphin SDK (OS/DVD/VI/PAD/CARD), deferred completions
+│   ├── decomp_port/            # Port-side data stand-ins + byte-order fixups for decomp TUs
 │   ├── video/                  # Volk Vulkan 1.3 renderer & librashader bridge
 │   └── ui/                     # Dear ImGui launcher & 5-tab settings overlay
 └── tests/                      # CTest unit suite (disc, FST, GCI, config, input, shims)
@@ -49,9 +54,14 @@ fzero-gx-pc/
    - Amusement Vision `.lz` (AV-LZSS) decompressor, U8 `.arc` parser, GameCube tiled texture decoders (`I4`, `I8`, `IA4`, `IA8`, `RGB565`, `RGB5A3`, `RGBA8`, `CMPR`), Amusement Vision / Nintendo `.tpl` loaders, and `.gma` / `GCMF` + GX display-list / stitched-mesh parsers.
    - Core **GX-to-Vulkan 1.3** 3D renderer (`GxVulkanBackend` + `GxStateProcessor`) with depth buffer, pipeline cache, 16-stage TEV ubershader, alpha compare, fog, live GX FIFO command decoding, mid-frame EFB copy-to-texture, Hor+ widescreen projection, internal resolution scaling, AMD FSR 1.0 (EASU + RCAS), and CRT/`librashader` post-FX integration.
    - Interactive **3D GX Viewer** & **U8 Archive Explorer** / **TPL Inspector** integrated into the Dear ImGui overlay.
-4. **Milestone 4 — Widescreen, High-FPS Interpolation & FSR:**
+4. **Option B — main.dol TUs + native SDK (In progress):**
+   - CMake `fzgx_decomp` compiles main.dol TUs natively (`arc.c`, `ClampStick.c`/`PADClamp`, `fn_8007ED90.c`) with `mwcc_shim.h` force-included and 64-bit hazards (`pointer-to-int-cast`, `int-conversion`, implicit declarations) as errors.
+   - CMake `fzgx_sdk` implements OS (arena, time, calendar, interrupts), DVD (FST paths, sync/async reads, mod overrides), VI (retrace pacing + callbacks), PAD (InputManager ports, rumble) and CARD (GCI folders) with retail completion timing: async callbacks run at retrace, status polls and interrupt re-enable.
+   - CMake `fzgx_boot` boots the SDK in retail `game_main.c` order and runs `main_rel`'s entry on the main thread; the host frame runs from `VIWaitForRetrace`, so game and host share one thread. Overlay **Boot Game** / `--boot`.
+   - `include/fzgx_port/decomp_overrides/` replaces the decomp's hardware/asm headers (paired-single, FPSCR, GQR, locked-cache mtxA, `hw_regs.h`, `gx.h`, `OSFastCast.h`) with C over emulated Gekko state; `mwcc_shim.h` supplies the MWCC intrinsics. `main_rel` burn-down: `docs/MAIN_REL_STATUS.md` (target `main_rel_status`), 6 / 85 TUs compiling; the rest is per-TU 64-bit work (pointers held in `u32`, conflicting declarations), plus `mathutil.c`, heap/arena TUs and ad-hoc SDK prototypes returning pointers as `u32`.
+5. **Milestone 4 — Widescreen, High-FPS Interpolation & FSR:**
    - Patch/hook 3D projection matrices and frustum culling for arbitrary Hor+ aspect ratios (`16:9`, `21:9`) and toggleable HUD anchoring.
    - Add transform/camera render-frame interpolation for 120/144/240 FPS on top of fixed 60 Hz physics.
    - Add AMD FSR 1.0 (EASU + RCAS) pass slot before final output.
-5. **Milestone 5 — Full Game Completion & Polish:**
+6. **Milestone 5 — Full Game Completion & Polish:**
    - All 15 `.rel` modules linked/loaded, Story Mode `.sfd` FMVs verified, direct `WUP-028` GameCube USB adapter support via `libusb`, PAL/NTSC-J multi-region verification.
