@@ -1,8 +1,8 @@
 # F-Zero GX Native PC Port (`fzero-gx-pc`) — Session Handoff Document
 
-**Date:** 2026-11-26  
+**Date:** 2026-11-27  
 **Workspace:** `/home/erlend/Projects/fzero-gx-pc`  
-**Status:** Milestones 1, 2 & 3 complete. **Option B (main.dol TUs + native Dolphin SDK) first slice landed**: decomp TUs compile natively via `fzgx_decomp`, and `fzgx_sdk` replaces the OS / DVD / VI / PAD / CARD libraries over `platform_api.h`.
+**Status:** Milestones 1, 2 & 3 complete (committed in `f8e62ed`), plus **Option B (native Dolphin SDK, boot path, decomp header layer)** committed in `ce23de3` and pushed to `origin/main`. Active focus is now shifting upstream to `karamzov123/fzero-gx-decomp` (R1–R7 recompilation readiness) via `/home/erlend/Projects/fzero-gx-decomp` before resuming downstream `main_rel` per-TU work.
 
 ---
 
@@ -29,14 +29,17 @@ All core architectural decisions were resolved during the initial `/grill-me` de
 
 ## 2. Current Repository & Git State
 
-- **Local repo:** `/home/erlend/Projects/fzero-gx-pc` on branch `main`, remote `origin` = `https://github.com/jacerle/fzero-gx-pc.git`.
-  - One commit so far: `f8e62ed` (Milestones 1-3). **All Option B work (native SDK, boot path, decomp header layer, `main_rel` status) is uncommitted** in the worktree.
-  - `.gitignore` excludes `build/`, `roms/`, `orig/`, `*.iso`, `*.gcm`, `*.rvz`, `*.wia`, `*.gci`, `*.raw`, `*.dol`, `*.rel`, `*.sfd`, `*.adx`, `librashader.so`, `librashader.dll`, `fzero-gx-pc.json`, `.cache/`, `compile_commands.json`.
-- **Submodule (`external/fzero-gx-decomp`):**
-  - Points to `https://github.com/jacerle/fzero-gx-decomp.git` (`main`), synced from `karamzov123/fzero-gx-decomp` up to commit `c8b427c04` (`main_rel: _prolog.c is two TUs; alloc/camera map data ranges follow the splits`).
+- **Local repo:** `/home/erlend/Projects/fzero-gx-pc` on branch `main`, remote `origin` = `https://github.com/jacerle/fzero-gx-pc.git` (public).
+  - Commits pushed to `origin/main`:
+    - `f8e62ed` — Milestones 1–3: RVZ/ISO/FST, ADX/Sofdec AV, asset pipeline (`.lz`/`.arc`/`.tpl`/`.gma`), GX-to-Vulkan 16-stage TEV/EFB backend, Hor+, AMD FSR 1.0 (EASU + RCAS).
+    - `ce23de3` — Option B: native Dolphin SDK (`fzgx_sdk`), boot path (`fzgx_boot`), decomp header override layer, `main_rel_status` burn-down target.
+  - `.gitignore` excludes `build/`, `roms/`, `orig/`, `*.iso`, `*.gcm`, `*.rvz`, `*.wia`, `*.gci`, `*.raw`, `*.dol`, `*.rel`, `*.sfd`, `*.adx`, `librashader.so`, `librashader.dll`, `fzero-gx-pc.json`, `imgui.ini`, `.cache/`, `compile_commands.json`.
+- **Submodule (`external/fzero-gx-decomp`) & Standalone Decomp Workspace:**
+  - Submodule currently pins `https://github.com/jacerle/fzero-gx-decomp.git` at `c8b427c04` (`main_rel: _prolog.c is two TUs; alloc/camera map data ranges follow the splits`).
+  - **2026-11-27 update:** `jacerle/fzero-gx-decomp` (`main`) has been synced with upstream `karamzov123/fzero-gx-decomp` up to **`daa95daa3`** and cloned as a standalone workspace at `/home/erlend/Projects/fzero-gx-decomp` (with `upstream` remote configured and a local `HANDOFF.md` excluded via `.git/info/exclude`) for upstream R1–R7 PR work.
   - Upstream decomp matches 16/16 retail `GFZE01` binaries byte-for-byte (`7,351 / 7,351` functions, `98.79%` authored C), and is actively working through R1–R7 recompilation readiness (`external/fzero-gx-decomp/docs/RECOMPILATION_SCOPE.md`).
-  - The port builds against upstream `main` `c8b427c04`. The submodule checkout also has the retail targets in `orig/GFZE01/` (gitignored, extracted from the RVZ) and the CodeWarrior toolchain in `build/`, so upstream's matching check runs locally: in `external/fzero-gx-decomp`, `python3 configure.py && ninja` (expect `16 files OK`), `uv run tools/fzgx.py lint`, `uv run tools/fzgx.py check <fn>`.
-  - **Upstream PR [karamzov123/fzero-gx-decomp#438](https://github.com/karamzov123/fzero-gx-decomp/pull/438)** from `jacerle:portability/shared-sdk-headers` (`f00da0e48`): `DVDFileInfo`/`DVDCallback` into `dolphin/dvd.h`, `PADStatus` into new `dolphin/pad.h`, `card.h` `new` parameter renamed. Verified 16 files OK, lint clean. **When it merges and the submodule is bumped, remove the duplicate `DVDFileInfo`/`DVDCallback`/`PADStatus` definitions from `include/fzgx_port/dolphin_sdk.h`** (redefinition errors otherwise).
+  - The submodule checkout also has the retail targets in `orig/GFZE01/` (gitignored, extracted from the RVZ) and the CodeWarrior toolchain in `build/`, so upstream's matching check runs locally (`python3 configure.py && ninja`, `uv run tools/fzgx.py lint`, `uv run tools/fzgx.py check <fn>`).
+  - **Upstream PR [karamzov123/fzero-gx-decomp#438](https://github.com/karamzov123/fzero-gx-decomp/pull/438)** (`include: share DVDFileInfo and PADStatus SDK types; C++-safe card.h`) was **MERGED on 2026-11-27** (included in `daa95daa3`). **When bumping `external/fzero-gx-decomp` from `c8b427c04` to `daa95daa3+`, remove the duplicate `DVDFileInfo`/`DVDCallback`/`PADStatus` definitions from `include/fzgx_port/dolphin_sdk.h`** (redefinition errors otherwise) and re-run `main_rel_status` + `ctest`.
   - Not upstreamed: the `arc.c:159` pointer fix. Every pointer spelling (`p + len`, `len + p`, `p += len`, `&p[len]`, `&len[p]`) changes one `add` operand order in `fn_8006A554` (retail `add r25, r28, r25`), breaking `main.dol`. A matching portable spelling needs a pointer-sized integer typedef (`u32` under MWCC) that upstream does not have yet; the port keeps `patches/decomp/src/dol/arc.c.patch`.
 
 ---
@@ -125,24 +128,21 @@ ctest --preset linux-debug --output-on-failure
 
 ## 5. Known Gaps & Deferred Items
 
-- **Git housekeeping:** Option B work is uncommitted (see §2).
+- **Submodule bump pending:** `external/fzero-gx-decomp` is still pinned at `c8b427c04`; upstream (`daa95daa3`) now includes merged PR #438 and Sofdec TU work. Bumping requires removing duplicate `DVDFileInfo`/`DVDCallback`/`PADStatus` from `include/fzgx_port/dolphin_sdk.h`.
 - **RVZ compression:** Supports `None (0)` and `Zstandard (5)` (standard Dolphin RVZ); `Bzip2`, `LZMA`, and `LZMA2` return an explicit unsupported error.
-- **`librashader` binary:** Loaded dynamically at runtime (`librashader.so` / `librashader.dll`); user must place the prebuilt binary beside the executable or set its path in `Shaders & Post-FX` to use `.slangp` presets (otherwise the built-in Vulkan CRT shader works out of the box).
+- **`librashader` binary:** Loaded dynamically at runtime (`librashader.so` / `librashader.dll`); user must place the prebuilt binary beside the executable or set its path in `Shaders & Post-FX` to use `.slangp` presets (otherwise the built-in Vulkan CRT shader + AMD FSR 1.0 work out of the box).
 - **WUP-028 USB Adapter:** `GcUsbAdapterProvider` is a stub pending `libusb` integration.
-- **AMD FSR:** Deferred to a later milestone.
 - **Upstream decomp portability:** `external/fzero-gx-decomp` still has DOL TU splits, data imports, direct GX FIFO writes, and 32-bit pointer casts being retired upstream.
 
 ---
 
-## 6. Recommended Next Steps (Milestone 3 Options)
+## 6. Recommended Next Steps
 
-Milestone 3 (Option A) is complete; Option B is in progress. Commit the current worktree first.
+1. **Active Priority — Contribute Upstream R1–R7 Fixes First (`/home/erlend/Projects/fzero-gx-decomp`):**
+   - Work from the standalone synced fork `/home/erlend/Projects/fzero-gx-decomp` (`jacerle/fzero-gx-decomp`, tracking `karamzov123/fzero-gx-decomp:main`) on R1–R5 recompilation readiness: DOL TU map/collapse, data ownership, shared SDK headers, hardware-address removal, and 64-bit pointer↔`u32` fixes.
+   - See `/home/erlend/Projects/fzero-gx-decomp/HANDOFF.md` for the full list of upstream blockers surfaced by `fzero-gx-pc`.
 
-1. **Option A (Recommended): GX-to-Vulkan 3D Backend + Real F-Zero GX `.lz` / `.tpl` / `.gma` / `.arc` Rendering**
-   - Implement Amusement Vision's `.lz` LZSS decompressor (mirroring `external/fzero-gx-decomp/tools/avlz.py`) and U8 `.arc` parser.
-   - Implement GameCube tiled texture decoders (`CMPR`/DXT1, `RGBA8`, `RGB5A3`, `RGB565`, `I4`, `I8`, `IA4`, `IA8`) and `.tpl` / `.gma` model parsers.
-   - Build the core **GX-to-Vulkan 1.3** 3D renderer: depth buffer, GX vertex-descriptor/display-list execution, GX projection/modelview matrices, lighting, and TEV combiner shaders — allowing immediate 3D rendering and inspection of real F-Zero GX machines and stages from your `.rvz` with Hor+ widescreen, internal scaling, and CRT shaders.
-
-2. **Option B: Start Compiling & Booting `main.dol`**
-   - Boot path and the decomp header layer are done (§4). Next: per-TU work from `docs/MAIN_REL_STATUS.md` (overlays or upstream R5), starting with the pointer↔`u32` casts; then the 2,651 data-import files, the DOL code `main_rel` calls, and per-module `_prolog` renaming at link time.
-   - Blockers found (fix via overlays or upstream R4/R5): `mathutil.c` has 53 paired-single `asm` entry points with register ABIs behind `void(void)` prototypes, so a native version needs each caller's real argument contract first; `os/heap.c`, `os/OSArena.c`, `fstload.c` truncate pointers through `u32`; game code declares SDK functions ad hoc with pointer returns as `u32` (`extern u32 OSGetArenaHi(void)` in 17 files, `DVDReadPrio(u32, ...)`), which breaks on 64-bit once those TUs are linked against `fzgx_sdk`.
+2. **When Returning to `fzero-gx-pc` (Submodule Bump + `main_rel` Bring-Up):**
+   - Bump `external/fzero-gx-decomp` to the latest synced `jacerle/fzero-gx-decomp` commit, remove the now-upstream `DVDFileInfo`/`DVDCallback`/`PADStatus` duplicates in `include/fzgx_port/dolphin_sdk.h`, and re-run `main_rel_status` + `ctest`.
+   - Continue per-TU bring-up from `docs/MAIN_REL_STATUS.md` (pointer↔`u32` casts, 2,651 data-import files, DOL code called by `main_rel`, per-module `_prolog` renaming at link time).
+   - Known blockers (best resolved upstream via R4/R5): `mathutil.c` (53 paired-single `asm` entry points behind `void(void)` prototypes), `os/heap.c` / `os/OSArena.c` / `fstload.c` (`u32` pointer truncation), and ad-hoc SDK externs with `u32` pointer returns (`extern u32 OSGetArenaHi(void)` in 17 files, `DVDReadPrio(u32, ...)`).
